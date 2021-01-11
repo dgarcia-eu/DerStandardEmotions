@@ -1,0 +1,141 @@
+---
+title: "Validating social media macroscopes of emotions"
+subtitle: "Reproducibility resources"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: Max Pellert, David Garcia
+output: github_document
+---
+
+```{r, message=FALSE, results='hide'}
+library(data.table) #data.table_1.13.0
+library(ggplot2) #ggplot2_3.3.2 
+library(lmtest) #lmtest_0.9-37   
+library(dplyr) #dplyr_1.0.2
+library(sandwich) #sandwich_2.5-1
+library(boot) #boot_1.3-24
+            
+Sys.setlocale("LC_TIME", "en_US.UTF-8")
+knitr::opts_chunk$set(echo=TRUE,warning=FALSE,message=FALSE)
+```
+
+```{r, eval=T}
+theme_paper <- function(){
+  theme_bw() %+replace%
+    theme(
+      axis.title = element_text(size = 14),
+      axis.text = element_text(colour="black", size=12),
+      panel.grid.major = element_line(colour = "grey90"),
+      panel.grid.minor = element_line(colour="grey90"),
+      panel.background = element_rect(fill = "white"),
+      strip.background=element_rect(fill="white"))
+}
+
+theme_set(theme_paper())
+```
+
+```{r get_data}
+pl <- read.csv("TSdata.csv")
+sum(pl$Nsurvey[!is.na(pl$Nsurvey)])
+sum(pl$Nposts)
+pl$prop_good.n <- round(pl$prop_good*pl$Nsurvey)
+pl$sent <- (pl$GS+pl$LIWC)/2
+pl$date <- as.Date(pl$date)
+pl <- as.data.table(pl)
+```
+
+```{r calcCI, eval=F}
+bl <- lapply(3:nrow(pl),function(i) return(c(rep(1,pl[i,prop_good.n]),rep(0,pl[i,Nsurvey-prop_good.n]))))
+
+meanfun <- function(data, indices){
+  sum(data[indices])/length(data[indices])
+}
+
+blcis <- lapply(1:length(bl),function(x){
+  
+  bo <- boot(bl[[x]], statistic=meanfun, R=10000,parallel = "multicore",ncpus = 4)
+
+  cis <- apply(bo$t,2, quantile, c(.025, 0.975))[,1]
+  
+})
+saveRDS(blcis, file="SurveyCIs.RDS")
+```
+
+```{r twolineplot_pos,include=T}
+blcis <- readRDS("SurveyCIs.RDS")
+pl$perc_good <- 100*pl$prop_good
+
+mp <- lm(perc_good~sent,data=pl)
+shift <- mp$coefficients[1]
+scale <- mp$coefficients[2] 
+
+cidt <- data.table(matrix(unlist(blcis),ncol=2,byrow=T))
+setnames(cidt,c("cimin","cimax"))
+cidt$cimin <- 100*cidt$cimin
+cidt$cimax <- 100*cidt$cimax
+
+ggplot(cbind(pl[date>=as.Date("2020-11-11")],cidt), aes(x=date)) +
+  geom_line( aes(y=perc_good),size=1.1, color="blue") +
+  geom_point(aes(y=perc_good), color="blue", size=2) + 
+  geom_ribbon(aes(y=perc_good,ymin=cimin,ymax=cimax),alpha=0.25, bg="blue") +
+  geom_line( aes(y=shift + scale*sent), color="red",size=1.1) +
+  geom_point(aes(y= shift + scale*sent),color="red", size=2) +
+  scale_y_continuous( name = '% Positive Emotions in Survey',
+                      sec.axis = sec_axis(~ (.-shift)/scale, name="Text Sentiment",
+                                          breaks=seq(0.05,0.25,0.05)), breaks=seq(60,75,2.5)) + 
+  theme_paper() + theme(axis.line.y.right = element_line(color = "red"), 
+                        axis.ticks.y.right = element_line(color = "red"), 
+                        axis.title.y.right = element_text(color = "red")) + xlab("Date")
+```
+
+```{r correlation}
+cor.test(pl$prop_good,pl$sent)
+```
+
+
+```{r scatterplot_pos}
+ggplot(pl, aes(x=sent,y=perc_good)) +
+geom_smooth(method="lm", se=F, color="gray", lwd=1.5) + geom_point(size=2) + ylab('% Positive in Survey') +
+  xlab("Text Sentiment") + theme(axis.title = element_text(size = 22),
+      axis.text = element_text(colour="black", size=20))
+
+fitsen <- lm(prop_good ~ sent,data=na.omit(pl,cols=c("prop_good","sent")))
+
+round(coeftest(fitsen, vcov=vcovHAC(fitsen)),3)
+
+round(coefci(fitsen, vcov=vcovHAC(fitsen)),3)
+
+summary(fitsen)
+```
+
+```{r diffscatterplot_pos}
+pl$difgood <- c(NA,diff(pl$perc_good))
+pl$difsent <- c(NA,diff(pl$sent))
+
+ggplot(pl, aes(x=difsent,y=difgood)) +
+geom_smooth(method="lm",color = "gray",se=F, lwd=1.5) + geom_point(size=2) + ylab('Change of % Positive') +
+  xlab("Text Sentiment") + geom_vline(xintercept =0,linetype=2) +
+  geom_hline(yintercept =0,linetype=2) + theme(axis.title = element_text(size = 22),
+      axis.text = element_text(colour="black", size=20))
+
+pl$difgood <- c(NA,diff(pl$prop_good))
+model <- lm(difgood ~ difsent,pl)
+
+round(coeftest(model, vcov=vcovHAC(model)),3)
+
+round(coefci(model, vcov=vcovHAC(model)),3)
+
+summary(model)
+```
+
+
+```{r}
+cor(pl %>% select(LIWCpos, LIWCneg, GSpos, GSneg, prop_good) %>% filter(complete.cases(pl)))
+
+fitsen <- lm(scale(prop_good) ~  scale(GSpos) + scale(GSneg) + scale(LIWCpos) + scale(LIWCneg) - 1, data=pl)
+summary(fitsen)
+round(coeftest(fitsen, vcov=vcovHAC(fitsen)),3)
+round(coefci(fitsen, vcov=vcovHAC(fitsen)),3)
+
+anova(fitsen)
+```
+
